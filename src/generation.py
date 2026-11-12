@@ -25,8 +25,29 @@ def compute_majority_vote(answers: list[int | None]) -> int | None:
     Ignores None values. Breaks ties deterministically in favor of the answer
     that appeared earliest in the list.
     """
-    # TODO: Implement deterministic majority voting
-    raise NotImplementedError("Implement compute_majority_vote in src/generation.py")
+    if not answers:
+        return None
+
+    # dicts keep insertion order, so keys are in first-appearance order
+    ans_count = {}
+    for a in answers:
+        if a is None:
+            continue
+        if a not in ans_count:
+            ans_count[a] = 1
+        else:
+            ans_count[a] = ans_count[a] + 1
+
+    ans_majority = None
+    max_count = 0
+    for ans in ans_count:
+        # strict '>' keeps the earliest-seen answer on a tie
+        if ans_count[ans] > max_count:
+            max_count = ans_count[ans]
+            ans_majority = ans
+
+    return ans_majority
+
 
 
 def run_greedy(
