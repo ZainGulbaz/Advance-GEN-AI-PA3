@@ -1,7 +1,11 @@
 """
 src/generation.py - Prompt formatting and baseline generation routines.
 """
+import time
 from typing import Any, Callable
+
+from .extraction import extract_answer, parse_steps
+from .utils import GREEDY_GEN_KWARGS, make_hf_generate_fn
 
 GenerateFn = Callable[[str, int, dict], list[dict]]
 # generate_fn(raw_prompt, num_samples, gen_kwargs) -> list of {"text": str, "num_tokens": int}
@@ -74,8 +78,30 @@ def run_greedy(
     Returns:
       prompt, completion, steps, answer, generation_calls, generated_tokens, time_seconds
     """
-    # TODO: Implement greedy baseline decoding
-    raise NotImplementedError("Implement run_greedy in src/generation.py")
+    start = time.perf_counter()
+
+    if generate_fn is None:
+        generate_fn = make_hf_generate_fn(model, tokenizer)
+
+    prompt = format_step_prompt(question)
+    outputs = generate_fn(prompt, 1, dict(GREEDY_GEN_KWARGS))
+    completion = outputs[0]["text"]
+    generated_tokens = outputs[0]["num_tokens"]
+
+    steps = parse_steps(completion)
+    answer = extract_answer(completion)
+
+    elapsed = time.perf_counter() - start
+
+    return {
+        "prompt": prompt,
+        "completion": completion,
+        "steps": steps,
+        "answer": answer,
+        "generation_calls": 1,
+        "generated_tokens": generated_tokens,
+        "time_seconds": elapsed,
+    }
 
 
 def run_self_consistency(
