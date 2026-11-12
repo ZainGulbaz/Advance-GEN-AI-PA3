@@ -1,9 +1,12 @@
 """
 src/search.py - Path aggregation, Best-of-N search, and compute-matched search.
 """
+import time
 from typing import Any, Callable
 
-from .generation import compute_majority_vote
+from .generation import compute_majority_vote, run_self_consistency
+from .prm_judge import score_path
+from .utils import make_hf_judge_fn
 
 GenerateFn = Callable[[str, int, dict], list[dict]]
 JudgeFn = Callable[[str], dict]
@@ -133,8 +136,46 @@ def run_prm_best_of_n(
       selected, answer, candidates [each augmented with step_scores, rationales],
       generation_calls, judge_calls, generated_tokens, judge_tokens, time_seconds
     """
-    # TODO: Implement PRM Best-of-N search over candidate trajectories
-    raise NotImplementedError("Implement run_prm_best_of_n in src/search.py")
+    start = time.perf_counter()
+
+    generation_calls = 0
+    generated_tokens = 0
+    if candidates is None:
+        # standalone: draw our own pool; it counts toward this call's generation cost
+        sc = run_self_consistency(
+            model=model, tokenizer=gen_tokenizer, question=question, n=n, generate_fn=generate_fn
+        )
+        candidates = sc["candidates"]
+        generation_calls = sc["generation_calls"]
+        generated_tokens = sc["generated_tokens"]
+
+    if judge_fn is None:
+        judge_fn = make_hf_judge_fn(judge_model, judge_tokenizer)
+
+    # judge every step of every candidate (no early stopping); copies keep a shared pool untouched
+    scored = []
+    judge_calls = 0
+    judge_tokens = 0
+    for cand in candidates:
+        res = score_path(judge_model, judge_tokenizer, question, cand, judge_fn)
+        scored.append({**cand, "step_scores": res["step_scores"], "rationales": res["rationales"]})
+        judge_calls += res["judge_calls"]
+        judge_tokens += res["judge_tokens"]
+
+    selected = select_best_path(scored, aggregation_strategy, penalty_lambda)
+
+    elapsed = time.perf_counter() - start
+
+    return {
+        "selected": selected,
+        "answer": selected["answer"],
+        "candidates": scored,
+        "generation_calls": generation_calls,
+        "judge_calls": judge_calls,
+        "generated_tokens": generated_tokens,
+        "judge_tokens": judge_tokens,
+        "time_seconds": elapsed,
+    }
 
 
 def run_compute_matched_self_consistency(
@@ -155,5 +196,35 @@ def run_compute_matched_self_consistency(
       candidates, answer, generation_calls (new samples only), total_samples,
       generated_tokens (new samples only), time_seconds
     """
-    # TODO: Implement compute-matched Self-Consistency with sample reuse
-    raise NotImplementedError("Implement run_compute_matched_self_consistency in src/search.py")
+    start = time.perf_counter()
+
+    # reuse the shared pool first; never more than target_calls of it
+    reused = list(existing_candidates or [])[:target_calls]
+    deficit = target_calls - len(reused)
+
+    new_candidates = []
+    generation_calls = 0
+    generated_tokens = 0
+    if deficit > 0:
+        sc = run_self_consistency(
+            model=model, tokenizer=tokenizer, question=question,
+            n=deficit, temperature=temperature, generate_fn=generate_fn,
+        )
+        new_candidates = sc["candidates"]
+        generation_calls = sc["generation_calls"]
+        generated_tokens = sc["generated_tokens"]
+
+    # existing first, then new, so the first N candidates match the SC@N scaling curve
+    candidates = reused + new_candidates
+    answer = compute_majority_vote([c.get("answer") for c in candidates])
+
+    elapsed = time.perf_counter() - start
+
+    return {
+        "candidates": candidates,
+        "answer": answer,
+        "generation_calls": generation_calls,
+        "total_samples": len(candidates),
+        "generated_tokens": generated_tokens,
+        "time_seconds": elapsed,
+    }
