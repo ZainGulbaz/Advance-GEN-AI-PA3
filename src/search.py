@@ -3,6 +3,8 @@ src/search.py - Path aggregation, Best-of-N search, and compute-matched search.
 """
 from typing import Any, Callable
 
+from .generation import compute_majority_vote
+
 GenerateFn = Callable[[str, int, dict], list[dict]]
 JudgeFn = Callable[[str], dict]
 
@@ -22,8 +24,26 @@ def aggregate_path_score(
       - 'step_penalty': mean(step_scores) - penalty_lambda * count(r_t == -1.0).
       - An unknown strategy raises ValueError.
     """
-    # TODO: Implement min, product, and step_penalty aggregation
-    raise NotImplementedError("Implement aggregate_path_score in src/search.py")
+    # validate first so a misspelled strategy is caught even on an empty list
+    if strategy not in ("min", "product", "step_penalty"):
+        raise ValueError(f"Unknown aggregation strategy: {strategy!r}")
+
+    if not step_scores:
+        return -1.0
+
+    if strategy == "min":
+        return float(min(step_scores))
+
+    if strategy == "product":
+        score = 1.0
+        for r in step_scores:
+            score *= min(max((r + 1) / 2, 0.01), 0.99)
+        return score
+
+    # step_penalty
+    mean = sum(step_scores) / len(step_scores)
+    num_invalid = step_scores.count(-1.0)
+    return mean - penalty_lambda * num_invalid
 
 
 def select_best_path(
@@ -53,8 +73,36 @@ def select_best_path(
          'path_score' (float) and 'num_tied' (int, size of the tied set).
          Does not mutate the inputs.
     """
-    # TODO: Implement best path selection with answer=None filtering and majority tie-breaking
-    raise NotImplementedError("Implement select_best_path in src/search.py")
+    if not candidate_paths:
+        raise ValueError("select_best_path needs at least one candidate")
+
+    # Rule 1: score every candidate (aggregate_path_score maps [] to -1.0)
+    scores = [
+        aggregate_path_score(c.get("step_scores") or [], aggregation_strategy, penalty_lambda)
+        for c in candidate_paths
+    ]
+
+    # Rule 2: drop answer=None candidates unless that would leave none
+    eligible = [i for i, c in enumerate(candidate_paths) if c.get("answer") is not None]
+    if not eligible:
+        eligible = list(range(len(candidate_paths)))
+
+    # Rule 3: tied set = eligible candidates within 1e-9 of the max, kept in index order
+    best = max(scores[i] for i in eligible)
+    tied = [i for i in eligible if abs(scores[i] - best) <= 1e-9]
+
+    # Rule 4: break ties by majority vote, then lowest index
+    winner = tied[0]
+    if len(tied) > 1:
+        vote = compute_majority_vote([candidate_paths[i].get("answer") for i in tied])
+        if vote is not None:
+            winner = next(i for i in tied if candidate_paths[i].get("answer") == vote)
+
+    # Rule 5: shallow copy so the caller's dict is untouched
+    chosen = dict(candidate_paths[winner])
+    chosen["path_score"] = scores[winner]
+    chosen["num_tied"] = len(tied)
+    return chosen
 
 
 def run_prm_best_of_n(

@@ -5,7 +5,7 @@ import time
 from typing import Any, Callable
 
 from .extraction import extract_answer, parse_steps
-from .utils import GREEDY_GEN_KWARGS, make_hf_generate_fn
+from .utils import GREEDY_GEN_KWARGS, SAMPLING_GEN_KWARGS, make_hf_generate_fn
 
 GenerateFn = Callable[[str, int, dict], list[dict]]
 # generate_fn(raw_prompt, num_samples, gen_kwargs) -> list of {"text": str, "num_tokens": int}
@@ -37,31 +37,28 @@ def compute_majority_vote(answers: list[int | None]) -> int | None:
     Ignores None values. Breaks ties deterministically in favor of the answer
     that appeared earliest in the list.
     """
-    # TODO: Implement deterministic majority voting
+    if not answers:
+        return None
 
-    if answers is None or len(answers)==0:
-        return None;
-
-    ans_count={};
-    previous_ans=[];
-
-    for index, a in answers:
-        
-        if a not in previous_ans:
-            ans_count[a]=1;
+    # dicts keep insertion order, so keys are in first-appearance order
+    ans_count = {}
+    for a in answers:
+        if a is None:
+            continue
+        if a not in ans_count:
+            ans_count[a] = 1
         else:
-           ans_count =  ans_count[a] + 1 ;
+            ans_count[a] = ans_count[a] + 1
 
-    max_ans=0;    
-    for ans in ans_count.keys():
-        if ans_count[ans] > max_ans:
-            max_ans=ans_count[ans];
-            ans_majority=ans;
-    
-    return ans_majority;a
-    
-    raise NotImplementedError("Implement compute_majority_vote in src/generation.py")
+    ans_majority = None
+    max_count = 0
+    for ans in ans_count:
+        # strict '>' keeps the earliest-seen answer on a tie
+        if ans_count[ans] > max_count:
+            max_count = ans_count[ans]
+            ans_majority = ans
 
+    return ans_majority
 
 
 def run_greedy(
@@ -119,5 +116,36 @@ def run_self_consistency(
       candidates [each: completion, steps, answer, num_tokens], answer, 
       generation_calls, generated_tokens, time_seconds
     """
-    # TODO: Implement Self-Consistency sampling and majority voting
-    raise NotImplementedError("Implement run_self_consistency in src/generation.py")
+    start = time.perf_counter()
+
+    if generate_fn is None:
+        generate_fn = make_hf_generate_fn(model, tokenizer)
+
+    prompt = format_step_prompt(question)
+    gen_kwargs = dict(SAMPLING_GEN_KWARGS)
+    gen_kwargs["temperature"] = temperature
+    outputs = generate_fn(prompt, n, gen_kwargs)
+
+    # keep sampling order: later stages reuse these candidates by index
+    candidates = []
+    for out in outputs:
+        completion = out["text"]
+        candidates.append({
+            "completion": completion,
+            "steps": parse_steps(completion),
+            "answer": extract_answer(completion),
+            "num_tokens": out["num_tokens"],
+        })
+
+    answer = compute_majority_vote([c["answer"] for c in candidates])
+    generated_tokens = sum(c["num_tokens"] for c in candidates)
+
+    elapsed = time.perf_counter() - start
+
+    return {
+        "candidates": candidates,
+        "answer": answer,
+        "generation_calls": n,
+        "generated_tokens": generated_tokens,
+        "time_seconds": elapsed,
+    }

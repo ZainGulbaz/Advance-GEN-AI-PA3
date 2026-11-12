@@ -1,7 +1,11 @@
 """
 src/prm_judge.py - PRM judge prompt construction, parsing, and step scoring.
 """
+import re
 from typing import Any, Callable
+
+from .utils import make_hf_judge_fn
+import re
 
 JudgeFn = Callable[[str], dict]
 # judge_fn(judge_prompt) -> {"text": str, "num_tokens": int}
@@ -25,8 +29,22 @@ def build_prm_judge_prompt(question: str, preceding_steps: list[str], current_st
     - The prompt contains the literal strings 'Verdict: VALID', 'Verdict: INVALID', and 'Rationale:'.
     - With an empty preceding_steps list, the prompt states '(no preceding steps)'.
     """
-    # TODO: Build verification prompt instructing 7B judge under local validity
-    raise NotImplementedError("Implement build_prm_judge_prompt in src/prm_judge.py")
+    if preceding_steps:
+        prev = "\n".join(f"Step {i}: {s}" for i, s in enumerate(preceding_steps, 1))
+    else:
+        prev = "(no preceding steps)"
+    
+    return (
+        "<role: you verify one step of a math solution>\n"
+        "<rule: judge only the Current Step; assume all preceding steps are correct ...>\n"
+        "<what makes a step VALID / INVALID; recompute the arithmetic>\n\n"
+        f"Problem: {question}\n\n"
+        f"Preceding steps:\n{prev}\n\n"
+        f"Current Step: {current_step}\n\n"
+        "<answer in exactly this format:>\n"
+        "Verdict: VALID or Verdict: INVALID\n"
+        "Rationale: <one sentence>\n"
+        )
 
 
 def parse_judge_decision(judge_output: str) -> tuple[float, str]:
@@ -47,8 +65,35 @@ def parse_judge_decision(judge_output: str) -> tuple[float, str]:
     followed by whitespace or end of string, so decimals like "2.5" are not split),
     or a newline, whichever comes first, stripped. If absent, returns empty string "".
     """
-    # TODO: Implement regex parsing for judge verdict and rationale
-    raise NotImplementedError("Implement parse_judge_decision in src/prm_judge.py")
+    if not isinstance(judge_output, str) or not judge_output:
+        return -1.0, ""
+
+    try:
+        # Rule 1: first explicit 'Verdict: VALID|INVALID' line wins
+        verdict = re.search(r"verdict\s*:\s*\**\s*(VALID|INVALID)\b", judge_output, flags=re.IGNORECASE)
+        if verdict:
+            score = 1.0 if verdict.group(1).upper() == "VALID" else -1.0
+        # Rules 2-3: word boundaries so 'INVALID' never counts as 'VALID'; check negatives first
+        elif re.search(r"\bINVALID\b|\bNOT\s+VALID\b", judge_output, flags=re.IGNORECASE):
+            score = -1.0
+        elif re.search(r"\bVALID\b", judge_output, flags=re.IGNORECASE):
+            score = 1.0
+        # Rule 4: unparseable defaults to INVALID
+        else:
+            score = -1.0
+
+        rationale = ""
+        label = re.search(r"rationale\s*:", judge_output, flags=re.IGNORECASE)
+        if label:
+            # Stop at the newline first, then at a sentence end that is followed by
+            # whitespace or end of line, so '2.5' is not split
+            line = judge_output[label.end():].split("\n", 1)[0]
+            end = re.search(r"[.!?](?=\s|$)", line)
+            rationale = (line[:end.end()] if end else line).strip()
+
+        return score, rationale
+    except Exception:
+        return -1.0, ""
 
 
 def score_path(
@@ -68,5 +113,27 @@ def score_path(
     Returns:
       step_scores, rationales, judge_calls, judge_tokens
     """
-    # TODO: Implement sequential step scoring under local validity
-    raise NotImplementedError("Implement score_path in src/prm_judge.py")
+    if judge_fn is None:
+        judge_fn = make_hf_judge_fn(judge_model, judge_tokenizer)
+
+    # read-only access: the candidate dict is never modified
+    steps = (candidate or {}).get("steps") or []
+
+    step_scores = []
+    rationales = []
+    judge_tokens = 0
+    for t, step in enumerate(steps):
+        # local validity: the judge sees only the steps before this one
+        prompt = build_prm_judge_prompt(question, steps[:t], step)
+        output = judge_fn(prompt)
+        score, rationale = parse_judge_decision(output["text"])
+        step_scores.append(score)
+        rationales.append(rationale)
+        judge_tokens += output["num_tokens"]
+
+    return {
+        "step_scores": step_scores,
+        "rationales": rationales,
+        "judge_calls": len(steps),
+        "judge_tokens": judge_tokens,
+    }
