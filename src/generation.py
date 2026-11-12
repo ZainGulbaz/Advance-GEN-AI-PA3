@@ -15,8 +15,16 @@ def format_step_prompt(question: str) -> str:
     
     Returns a raw instruction string (no chat template applied).
     """
-    # TODO: Build zero-shot prompt enforcing step-structured reasoning
-    raise NotImplementedError("Implement format_step_prompt in src/generation.py")
+    return (
+        "Solve the following math problem step by step.\n"
+        "Write each reasoning step on its own line, numbered as 'Step 1:', 'Step 2:', and so on.\n"
+        "Each step should do one calculation or deduction.\n"
+        "After the last step, write the final answer on its own line in exactly this form:\n"
+        "Final Answer: <integer>\n"
+        "Write only the integer after 'Final Answer:', with no units, symbols or extra words.\n"
+        "\n"
+        f"Problem: {question}\n"
+    )
 
 
 def compute_majority_vote(answers: list[int | None]) -> int | None:
@@ -25,28 +33,30 @@ def compute_majority_vote(answers: list[int | None]) -> int | None:
     Ignores None values. Breaks ties deterministically in favor of the answer
     that appeared earliest in the list.
     """
-    if not answers:
-        return None
+    # TODO: Implement deterministic majority voting
 
-    # dicts keep insertion order, so keys are in first-appearance order
-    ans_count = {}
-    for a in answers:
-        if a is None:
-            continue
-        if a not in ans_count:
-            ans_count[a] = 1
+    if answers is None or len(answers)==0:
+        return None;
+
+    ans_count={};
+    previous_ans=[];
+
+    for index, a in answers:
+        
+        if a not in previous_ans:
+            ans_count[a]=1;
         else:
-            ans_count[a] = ans_count[a] + 1
+           ans_count =  ans_count[a] + 1 ;
 
-    ans_majority = None
-    max_count = 0
-    for ans in ans_count:
-        # strict '>' keeps the earliest-seen answer on a tie
-        if ans_count[ans] > max_count:
-            max_count = ans_count[ans]
-            ans_majority = ans
-
-    return ans_majority
+    max_ans=0;    
+    for ans in ans_count.keys():
+        if ans_count[ans] > max_ans:
+            max_ans=ans_count[ans];
+            ans_majority=ans;
+    
+    return ans_majority;a
+    
+    raise NotImplementedError("Implement compute_majority_vote in src/generation.py")
 
 
 
